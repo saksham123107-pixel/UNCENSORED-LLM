@@ -1,1 +1,72 @@
+import subprocess, time, os, json, requests, getpass
 
+# ---------- CONFIG ----------
+MODEL = "thirdeyeai/Qwen2.5-Coder-7B-Instruct-Uncensored:Q4_0"
+NUM_CTX = 8192
+# ----------------------------
+
+def sh(cmd, check=True):
+    print(f">>> {cmd}")
+    subprocess.run(cmd, shell=True, check=check)
+
+# 0. Check GPU availability
+if subprocess.run("nvidia-smi", shell=True, capture_output=True).returncode != 0:
+    raise RuntimeError("No GPU found. Ensure Session options -> Accelerator is set to GPU T4 x2.")
+sh("nvidia-smi --query-gpu=name,memory.total --format=csv")
+
+# 1. Clear any stale locks and install essential tools quickly
+sh("rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock")
+sh("apt-get update -o Acquire::Check-Valid-Until=false -qq && apt-get install -y -qq --no-install-recommends zstd curl")
+
+# 2. Install Ollama
+sh("curl -fsSL https://ollama.com/install.sh | sh")
+sh("pip install -q -U pyngrok requests", check=False)
+
+# 3. Start Ollama server with CORS enabled
+env = os.environ.copy()
+env["OLLAMA_HOST"] = "0.0.0.0:11434"
+env["OLLAMA_ORIGINS"] = "*"
+
+subprocess.Popen(["ollama", "serve"], env=env,
+                 stdout=open("ollama.log", "w"), stderr=subprocess.STDOUT)
+
+for _ in range(60):
+    try:
+        requests.get("http://127.0.0.1:11434", timeout=2)
+        break
+    except Exception:
+        time.sleep(1)
+else:
+    raise RuntimeError("Ollama did not start. Check ollama.log")
+
+# 4. Securely set ngrok authtoken
+print("\nEnter your ngrok authtoken below:")
+ngrok_token = getpass.getpass()
+
+from pyngrok import ngrok, conf
+conf.get_default().auth_token = ngrok_token
+
+# 5. Open HTTP tunnel
+tunnel = ngrok.connect(11434, "http")
+
+print("\n" + "="*60)
+print(f"YOUR NGROK PUBLIC OLLAMA ENDPOINT: {tunnel.public_url}")
+print("="*60 + "\n")
+
+# 6. Pull the model and warm up
+sh(f"ollama pull {MODEL}")
+requests.post("http://127.0.0.1:11434/api/generate",
+              json={"model": MODEL, "prompt": "hi", "stream": False,
+                    "options": {"num_ctx": NUM_CTX}})
+sh("ollama ps")
+
+# 7. Keep-alive loop
+print("\n" + "="*60)
+print("Server is up and running! Keep this Kaggle cell active.")
+print("="*60 + "\n")
+
+try:
+    while True:
+        time.sleep(30)
+except KeyboardInterrupt:
+    print("Stopping server...")
